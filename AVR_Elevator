@@ -1,0 +1,183 @@
+/*
+ * Elevator.c
+ *
+ * Created: 2022-01-24 오전 6:07:12
+ * Author : Delcoii
+ 
+ * 지하 3층부터 22층까지 있는 엘레베이터. 스위치 1번으로 출발, 정지. 스위치 2번으로 상승, 하강 변경
+ * 지하 3층 도달 시 상승하고, 지상 22층 도달 시 하강함
+ */ 
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+#define F_CPU 16000000UL
+#include <util/delay.h>
+
+#define STOP	0
+#define UP		1
+#define DOWN	2
+
+volatile int state = 0;		// 상태.
+volatile int updown = 0;	// up이면 0, down이면 1로 state 정의 시 사용, 처음엔 올라가는 것으로 설정
+volatile int cmd = 1;		// 층은 영어로 cmd. 1층 부터 시작
+
+unsigned char digit[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x67};     // fnd 0123456789 모양
+unsigned char fnd_sel[2] = {0x02, 0x04};		// fnd 자릿수, PORTG 출력 값
+												// fnd의 가운데 2개만 사용합니다.
+	
+ISR(INT4_vect)				// SW1을 누를 때 발생하는 일
+{
+	_delay_ms(100);							// 스위치 바운스 기간 동안 기다림
+	EIFR = 1 << 4;							// 그 사이에 바운스에 의하여 생긴 인터럽트 무효화
+	
+	if((PINE & 0x10) == 0x10)
+		return;								// PIN E의 값이 0x10, 즉 high(스위치 안눌림)면 return;
+
+	if(state == STOP)				
+	{
+		if(updown == 0)						// STOP 상태이고 updown 0이면
+			state = UP;						// UP으로 상태 전환
+		else if(updown == 1)				// STOP 상태이고 updown 1이면
+			state = DOWN;					// DOWN으로 상태 전환
+	}
+	
+	else if(state == UP || state == DOWN)	// UP, DOWN 상태면 STOP으로
+		state = STOP;
+	
+}
+
+ISR(INT5_vect)
+{
+	_delay_ms(100);							// 스위치 바운스 기간 동안 기다림
+	EIFR = 1 << 5;							// 그 사이에 바운스에 의하여 생긴 인터럽트 무효화
+	 
+	if((PINE & 0x20) == 0x20)
+		return;								// PIN E의 값이 0x20, 즉 sw2 부분 high(스위치 안눌림)면 return;
+		
+	if(state == UP)							// UP DOWN을 바꿔줄 때 updown 수치도 바꿔준다.
+	{
+		state = DOWN;
+		updown = 1;
+	}
+	else if(state == DOWN)
+	{
+		state = UP;
+		updown = 0;
+	}
+	
+	else if(state == STOP)					// STOP 상태일 때 SW2를 누른다면
+	{
+		if(updown == 0)						// 궤적만 바꿔준다.
+			updown = 1;
+		else if(updown == 1)
+			updown = 0;
+	}
+}
+
+void init_elevator(void)
+{
+	DDRC = 0xff;				// C포트는 FND 데이터 신호
+	DDRG = 0x0f;				// G포트는 FND 선택 신호
+	
+	DDRE = 0x00;				// PE포트를 입력신호로
+	sei();						// SREG 7번 비트 활성화
+	
+	EICRB = 0x0a;				// 00001010으로 INT4, INT5 하강엣지 트리거
+	EIMSK = 0x30;				// 00110000으로 INT4, INT5 인터럽트 enable
+}
+
+void display_fnd(int count)					// 총 딜레이 10ms, 이외 us단위는 무시
+{
+	int i, fnd[2], disp_value;
+	
+	if(count >= 10)							// 지상 10층 이상일 때
+	{
+		fnd[1] = (count / 10) % 10;			// count의 10의자리
+		fnd[0] = count % 10;				// count의 1의자리
+		
+		for(i = 0; i < 2; i++)				// 5ms씩 번갈아서 두 칸이 켜짐
+		{
+			PORTC = digit[fnd[i]];
+			PORTG = fnd_sel[i];
+			_delay_ms(5);
+		}
+	}
+	
+	else if(count > 0 && count <= 9)		// 1 ~ 9층 일 때
+	{	
+		PORTC = digit[count];
+		PORTG = fnd_sel[0];
+		_delay_ms(10);
+	}
+	
+	else if(count < 0)							// 음수는 ( - 1) 모양으로 표현
+	{
+		disp_value = (-1) * count;
+		PORTC = 0x40;						// 하이픈
+		PORTG = fnd_sel[1];
+		_delay_ms(5);
+		
+		PORTC = digit[disp_value];			// count의 절댓값을 취함
+		PORTG = fnd_sel[0];
+		_delay_ms(5);
+	}
+}
+
+
+int main(void)
+{
+    int i;
+	init_elevator();
+
+    while (1) 
+    {
+		if(state == STOP)				// STOP 상태일 때
+			display_fnd(cmd);			// 아무것도하지마세요
+		
+		else if(state == UP)			// UP 상태일 때
+		{
+			if(cmd == 0)				// 세상에 0층 같은건 없으니깐
+				cmd = 1;				// -1층에서 바로 1층으로 건너주기
+			
+			else if(cmd == 23)			// 층이 천장을 뚫어버리면
+			{
+				state = DOWN;			// DOWN state로 변경 후
+				updown = 1;
+				
+				cmd = 22;				// 다시 22층으로 내려준다.
+			}
+			
+			else
+			{
+				for(i = 0; i < 200; i++)	// 2초에 1층 오르게 설계
+					display_fnd(cmd);		// 10ms 지연 display_fnd를 200번 실행
+				
+				cmd++;
+			}
+		}
+		
+		else if(state == DOWN)			// DOWN 상태일 때
+		{
+			if(cmd == 0)				// 세상에 0층 같은건 없으니깐
+				cmd = -1;				// 지하 1층으로 내려버림
+				
+			else if(cmd == -4)			// 지하3층 밑으로 뚫려버리면
+			{
+				state = UP;				// UP state로 변경 후
+				updown = 0;
+				
+				cmd = -3;				// 지하 3층으로 올려줌
+			}
+			
+			else
+			{
+				for(i = 0; i < 200; i++)
+					display_fnd(cmd);
+				
+				cmd--;
+			}
+		}
+    }
+}
+
